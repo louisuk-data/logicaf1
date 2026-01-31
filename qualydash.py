@@ -2,8 +2,9 @@ import streamlit as st
 import pandas as pd
 import os
 
-# === CONFIG: EXACT FILE PATHS ===
-DATA_DIR = r"C:\Users\louie\OneDrive\Desktop\F1_Data"
+# === CONFIG: CLOUD COMPATIBLE PATH ===
+# This tells the server to look for the 'data' folder in the same directory as this script
+DATA_DIR = os.path.join(os.path.dirname(__file__), 'data')
 
 # === BRAND CONFIG ===
 TEAM_COLORS = {
@@ -69,7 +70,7 @@ def load_data():
 
 df = load_data()
 if df is None:
-    st.error(f"Data not found at {DATA_DIR}. Please run ingest.py.")
+    st.error(f"Data not found. I looked for 'qualy_laps_2024_onwards.csv' inside: {DATA_DIR}")
     st.stop()
 
 # --- FILTERING ---
