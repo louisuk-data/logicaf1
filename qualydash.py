@@ -1,12 +1,12 @@
 import streamlit as st
 import pandas as pd
 import os
-
-# === CONFIG: CLOUD COMPATIBLE PATH ===
-# This tells the server to look for the 'data' folder in the same directory as this script
-DATA_DIR = os.path.join(os.path.dirname(__file__), 'data')
+from PIL import Image, ImageDraw, ImageFont
+import io
 
 # === BRAND CONFIG ===
+DATA_DIR = "data"  # GitHub-safe relative path
+
 TEAM_COLORS = {
     "Red Bull Racing": "#0600EF", "Ferrari": "#DC0000", "McLaren": "#FF8700",
     "Mercedes": "#00D2BE", "Aston Martin": "#006F62", "Alpine": "#0090FF",
@@ -15,51 +15,24 @@ TEAM_COLORS = {
     "AlphaTauri": "#2B4562", "Racing Bulls": "#6692FF"
 }
 DEFAULT_COLOR = "#FF4B4B"
-TEXT_COLOR = "#332166"
-BRAND_BG_COLOR = "#F3ECFF"
 
-st.set_page_config(page_title="F1 Qualifying Analysis", layout="wide")
+CARD_BG = "#F3ECFF"   # Your brand card background
+FONT_PRIMARY = "Viga" # Your brand font
 
-# === CSS STYLES ===
-MAIN_STYLES = f"""
+st.set_page_config(page_title="F1 Qualifying", layout="centered")
+
+# Inject Google Font (Viga)
+st.markdown("""
+<style>
 @import url('https://fonts.googleapis.com/css2?family=Viga&display=swap');
-@import url('https://fonts.googleapis.com/css2?family=Roboto:wght@400;700&display=swap');
 
-html, body, [class*="css"], h1, h2, h3, p, div, span {{ 
-    font-family: 'Viga', sans-serif !important; 
-    color: {TEXT_COLOR}; 
-}}
-.stApp {{ background-color: #FFFFFF; }}
+html, body, [class*="css"] {
+    font-family: 'Viga', sans-serif !important;
+}
+</style>
+""", unsafe_allow_html=True)
 
-/* Result Row Styling */
-.result-row {{ 
-    display: flex; 
-    align-items: center; 
-    padding: 10px 0; 
-    border-bottom: 2px solid {BRAND_BG_COLOR}; 
-    font-family: 'Roboto', sans-serif; 
-    font-size: 14px;
-}}
-
-.pos-col {{ width: 40px; font-size: 16px; font-weight: bold; text-align: center; margin-right: 10px; }}
-.driver-col {{ width: 200px; display: flex; flex-direction: column; }}
-.driver-name {{ font-size: 15px; font-weight: 700; margin-bottom: 2px; }}
-.team-name {{ font-size: 11px; color: #666; text-transform: uppercase; }}
-.time-col {{ width: 90px; text-align: right; font-weight: bold; font-family: 'Roboto', monospace; }}
-.gap-txt-col {{ width: 80px; text-align: right; color: #666; font-size: 13px; margin-right: 15px; font-family: 'Roboto', monospace; }}
-.sector-col {{ width: 70px; text-align: center; color: #888; font-size: 12px; border-left: 1px solid #EEE; }}
-
-/* BAR CHART STYLES */
-.visual-col {{ width: 160px; padding: 0 5px; display: flex; align-items: center; justify-content: center; }}
-.bar-container {{ width: 100%; height: 6px; background-color: #EEE; border-radius: 3px; overflow: hidden; }}
-.bar-fill {{ height: 100%; border-radius: 3px; }}
-.team-border {{ width: 4px; height: 35px; margin-right: 10px; border-radius: 2px; }}
-"""
-
-st.markdown(f"<style>{MAIN_STYLES}</style>", unsafe_allow_html=True)
-st.title("F1 Qualifying Analysis")
-
-# === DATA LOADING ===
+# === LOAD DATA ===
 @st.cache_data
 def load_data():
     try:
@@ -70,24 +43,25 @@ def load_data():
 
 df = load_data()
 if df is None:
-    st.error(f"Data not found. I looked for 'qualy_laps_2024_onwards.csv' inside: {DATA_DIR}")
+    st.error("Data not found in /data. Please upload qualy_laps_2024_onwards.csv.")
     st.stop()
 
-# --- FILTERING ---
+# === FILTERS ===
 years = sorted(df["Year"].unique(), reverse=True)
-selected_year = st.sidebar.selectbox("Year", years)
+selected_year = st.selectbox("Season", years)
+
 events = df[df["Year"] == selected_year]["EventName"].unique()
-selected_event = st.sidebar.selectbox("Event", events)
+selected_event = st.selectbox("Grand Prix", events)
 
-gap_mode = st.sidebar.radio("Analysis Mode", ["Gap to Pole", "Gap to Teammate"])
-sort_mode = st.sidebar.radio("Sort By", ["Classification", "Biggest Gap"]) if gap_mode == "Gap to Teammate" else "Classification"
+gap_mode = st.radio("Gap Mode", ["Gap to Pole", "Gap to Teammate"])
 
-# --- DATA PROCESSING ---
+# === PROCESSING ===
 session = df[(df["Year"] == selected_year) & (df["EventName"] == selected_event)].copy()
 
 def parse_time(t):
     try:
-        if pd.isna(t) or t == "": return None
+        if pd.isna(t) or t == "":
+            return None
         return pd.to_timedelta(t).total_seconds()
     except:
         return None
@@ -97,136 +71,131 @@ for col in ["LapTime", "Sector1Time", "Sector2Time", "Sector3Time"]:
 
 session = session.dropna(subset=["LapTime"])
 
-# Get Best Lap
 best = session.sort_values("LapTime").drop_duplicates("Driver").reset_index(drop=True)
 best["Color"] = best["Team"].map(TEAM_COLORS).fillna(DEFAULT_COLOR)
-best["Q_Pos"] = best.index + 1
+best["Pos"] = best.index + 1
 
-# Format Helper
 def fmt_time(s):
-    if pd.isna(s): return "-"
+    if pd.isna(s):
+        return "-"
     m, sec = divmod(s, 60)
     return f"{int(m)}:{sec:06.3f}" if m > 0 else f"{sec:.3f}"
 
-# --- CALCULATE GAPS ---
-max_gap = 1.0
-
+# === GAP CALCULATION ===
 if gap_mode == "Gap to Pole":
     pole = best.iloc[0]["LapTime"]
     best["Gap"] = best["LapTime"] - pole
-    max_gap = best["Gap"].max()
-    if max_gap == 0: max_gap = 1
 else:
-    teammate_gaps = []
+    gaps = []
     for _, row in best.iterrows():
         team_laps = best[best["Team"] == row["Team"]].sort_values("LapTime")
         if len(team_laps) > 1:
-            fastest_in_team = team_laps.iloc[0]["LapTime"]
-            if row["LapTime"] == fastest_in_team:
-                second_fastest = team_laps.iloc[1]["LapTime"]
-                gap = row["LapTime"] - second_fastest
+            fastest = team_laps.iloc[0]["LapTime"]
+            if row["LapTime"] == fastest:
+                second = team_laps.iloc[1]["LapTime"]
+                gap = row["LapTime"] - second
             else:
-                gap = row["LapTime"] - fastest_in_team
+                gap = row["LapTime"] - fastest
         else:
             gap = 0
-        teammate_gaps.append(gap)
+        gaps.append(gap)
+    best["Gap"] = gaps
 
-    best["Gap"] = teammate_gaps
-    if sort_mode == "Biggest Gap":
-        best["AbsGap"] = best["Gap"].abs()
-        best = best.sort_values("AbsGap", ascending=False).drop(columns=["AbsGap"])
+# === FORMATTED FIELDS FOR IMAGE EXPORT ===
+best["LapTime_fmt"] = best["LapTime"].apply(fmt_time)
+best["Gap_fmt"] = best["Gap"].apply(
+    lambda g: "POLE" if g == 0 and gap_mode == "Gap to Pole" else f"{g:+.3f}s"
+)
 
-# === HTML GENERATION LOGIC ===
-visual_header = '<div style="width:160px; text-align:center;">Visual</div>' if gap_mode == "Gap to Pole" else ''
+# === HEADER ===
+st.title(f"{selected_event} — Qualifying")
+st.caption(f"Season {selected_year}")
 
-table_html = f"""
-<div style="display:flex; color:#888; font-size:12px; font-weight:bold; padding-bottom:5px; border-bottom:2px solid #333;">
-<div style="width:40px; text-align:center;">Pos</div>
-<div style="width:200px;">Driver / Team</div>
-<div style="width:90px; text-align:right;">Time</div>
-<div style="width:80px; text-align:right; margin-right:15px;">Gap</div>
-{visual_header}
-<div style="width:70px; text-align:center;">S1</div>
-<div style="width:70px; text-align:center;">S2</div>
-<div style="width:70px; text-align:center;">S3</div>
-</div>
-"""
-
+# === DRIVER CARDS (F1 App Style) ===
 for _, row in best.iterrows():
-    gap_val = row["Gap"]
-    
-    # Visual Column Logic
-    visual_html = ""
-    if gap_mode == "Gap to Pole":
-        pct = (gap_val / max_gap) * 100 if max_gap > 0 else 0
-        bar_div = f'<div class="bar-fill" style="width:{pct}%; background-color:{row["Color"]};"></div>'
-        visual_html = f'<div class="visual-col"><div class="bar-container">{bar_div}</div></div>'
-        gap_str = "POLE" if gap_val == 0 else f"+{gap_val:.3f}s"
-    else:
-        visual_html = "" 
-        gap_str = f"{gap_val:+.3f}s" if gap_val != 0 else "-"
+    with st.container(border=True):
+        st.markdown(
+            f"""
+            <div style="display:flex; align-items:center; gap:12px; background:{CARD_BG}; padding:12px; border-radius:10px;">
+                <div style="width:6px; height:50px; background:{row['Color']}; border-radius:4px;"></div>
+                <div style="flex:1;">
+                    <div style="font-size:20px; font-weight:700;">{row['Pos']}. {row['Driver']}</div>
+                    <div style="font-size:13px; opacity:0.7;">{row['Team']}</div>
+                </div>
+                <div style="text-align:right;">
+                    <div style="font-size:18px; font-weight:700;">{row['LapTime_fmt']}</div>
+                    <div style="font-size:13px; opacity:0.7;">{row['Gap_fmt']}</div>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
 
-    table_html += f"""
-<div class="result-row">
-<div class="team-border" style="background-color:{row['Color']};"></div>
-<div class="pos-col">{row['Q_Pos']}</div>
-<div class="driver-col">
-<span class="driver-name">{row['Driver']}</span>
-<span class="team-name">{row['Team']}</span>
-</div>
-<div class="time-col">{fmt_time(row['LapTime'])}</div>
-<div class="gap-txt-col">{gap_str}</div>
-{visual_html}
-<div class="sector-col">{row['Sector1Time']:.3f}</div>
-<div class="sector-col">{row['Sector2Time']:.3f}</div>
-<div class="sector-col">{row['Sector3Time']:.3f}</div>
-</div>
-"""
+        st.markdown(
+            f"""
+            <div style="display:flex; justify-content:space-between; margin-top:6px; font-size:13px;">
+                <div>S1: {row['Sector1Time']:.3f}</div>
+                <div>S2: {row['Sector2Time']:.3f}</div>
+                <div>S3: {row['Sector3Time']:.3f}</div>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
 
-# === DISPLAY TABLE ===
-st.subheader(f"{gap_mode} — {selected_event}")
-st.markdown(table_html, unsafe_allow_html=True)
+# === IMAGE RENDERER (PORTRAIT) ===
+def render_results_image(best, event, year):
+    width = 1080
+    card_height = 180
+    padding = 40
+    total_height = padding + len(best) * (card_height + 20)
 
-# === DOWNLOAD SECTION ===
+    img = Image.new("RGB", (width, total_height), CARD_BG)
+    draw = ImageDraw.Draw(img)
+
+    try:
+        title_font = ImageFont.truetype("arial.ttf", 60)
+        name_font = ImageFont.truetype("arial.ttf", 48)
+        small_font = ImageFont.truetype("arial.ttf", 36)
+    except:
+        title_font = name_font = small_font = ImageFont.load_default()
+
+    draw.text((padding, padding), f"{event} — Qualifying {year}", fill="black", font=title_font)
+    y = padding + 100
+
+    for _, row in best.iterrows():
+        draw.rectangle([padding, y, width - padding, y + card_height], fill=CARD_BG)
+        draw.rectangle([padding, y, padding + 12, y + card_height], fill=row["Color"])
+
+        draw.text((padding + 30, y + 10), f"{row['Pos']}. {row['Driver']}", fill="black", font=name_font)
+        draw.text((padding + 30, y + 80), row["Team"], fill="#555", font=small_font)
+
+        draw.text((width - padding - 300, y + 20), row["LapTime_fmt"], fill="black", font=name_font)
+        draw.text((width - padding - 300, y + 90), row["Gap_fmt"], fill="#444", font=small_font)
+
+        y += card_height + 20
+
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+# === EXPORT SECTION ===
 st.markdown("---")
-st.subheader("Downloads")
+st.subheader("Export")
 
-col1, col2 = st.columns(2)
+# CSV
+csv_data = best.to_csv(index=False).encode("utf-8")
+st.download_button(
+    label="📊 Download CSV",
+    data=csv_data,
+    file_name=f"qualifying_{selected_event}_{selected_year}.csv",
+    mime="text/csv"
+)
 
-# 1. HTML Download
-full_html_file = f"""
-<!DOCTYPE html>
-<html>
-<head>
-<meta charset="utf-8">
-<title>F1 Results - {selected_event}</title>
-<style>
-body {{ font-family: sans-serif; padding: 20px; background-color: white; }}
-{MAIN_STYLES}
-</style>
-</head>
-<body>
-<h2>{gap_mode} — {selected_event} ({selected_year})</h2>
-{table_html}
-<p style="margin-top:20px; font-size:12px; color:#888;">Generated by F1 Race Analysis</p>
-</body>
-</html>
-"""
-
-with col1:
-    st.download_button(
-        label="📄 Download Formatted HTML",
-        data=full_html_file,
-        file_name=f"qualifying_results_{selected_event}_{selected_year}.html",
-        mime="text/html"
-    )
-
-# 2. CSV Download
-with col2:
-    csv_data = best.to_csv(index=False).encode('utf-8')
-    st.download_button(
-        label="📊 Download Data (CSV)",
-        data=csv_data,
-        file_name=f"qualifying_data_{selected_event}_{selected_year}.csv",
-        mime="text/csv"
-    )
+# PNG IMAGE
+image_bytes = render_results_image(best, selected_event, selected_year)
+st.download_button(
+    label="📸 Download as Image (PNG)",
+    data=image_bytes,
+    file_name=f"qualifying_{selected_event}_{selected_year}.png",
+    mime="image/png"
+)
